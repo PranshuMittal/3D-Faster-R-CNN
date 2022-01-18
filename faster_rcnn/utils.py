@@ -353,36 +353,30 @@ class Dataset(object):
         return self.image_info[image_id]["path"]
 
     def load_image(self, image_id):
-        """Load the specified image and return a [H,W,3] Numpy array.
+        """Load the specified image and return a [H,W,D,3] Numpy array.
         """
         # Load image
-        image = skimage.io.imread(self.image_info[image_id]['path'])
-        # If grayscale. Convert to RGB for consistency.
-        if image.ndim != 3:
-            image = skimage.color.gray2rgb(image)
-        # If has an alpha channel, remove it for consistency
-        if image.shape[-1] == 4:
-            image = image[..., :3]
+        image = np.load(self.image_info[image_id]['path'])
         return image
 
-    def load_mask(self, image_id):
-        """Load instance masks for the given image.
+    def load_landmark(self, image_id):
+        """Load landmarks for the given image.
 
         Different datasets use different ways to store masks. Override this
         method to load instance masks and return them in the form of am
         array of binary masks of shape [height, width, instances].
 
         Returns:
-            masks: A bool array of shape [height, width, instance count] with
-                a binary mask per instance.
-            class_ids: a 1D array of class IDs of the instance masks.
+            bboxes: An array of landmark points represented as 3 dimensional bounding
+            boxes of dimension 1. 
+            class_ids: a 1D array of class IDs of the bounding boxes.
         """
         # Override this function to load a mask from your dataset.
         # Otherwise, it returns an empty mask.
         logging.warning("You are using the default load_mask(), maybe you need to define your own one.")
-        mask = np.empty([0, 0, 0])
+        bboxes = np.empty([0, 0, 0])
         class_ids = np.empty([0], np.int32)
-        return mask, class_ids
+        return bboxes, class_ids
 
 
 def resize_image(image, min_dim=None, max_dim=None, min_scale=None, mode="square"):
