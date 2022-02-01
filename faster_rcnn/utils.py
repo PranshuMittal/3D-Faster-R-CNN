@@ -20,6 +20,8 @@ import skimage.io
 import skimage.transform
 import urllib.request
 import shutil
+import PIL
+import cv2
 import warnings
 from distutils.version import LooseVersion
 
@@ -56,11 +58,11 @@ def extract_bboxes(mask):
         boxes[i] = np.array([y1, x1, y2, x2])
     return boxes.astype(np.int32)
 
-
+# Done
 def compute_iou(box, boxes, box_area, boxes_area):
     """Calculates IoU of the given box with the array of the given boxes.
-    box: 1D vector [y1, x1, y2, x2]
-    boxes: [boxes_count, (y1, x1, y2, x2)]
+    box: 1D vector [z1, y1, x1, z2, y2, x2]
+    boxes: [boxes_count, (z1, y1, x1, z2, y2, x2)]
     box_area: float. the area of 'box'
     boxes_area: array of length boxes_count.
 
@@ -68,25 +70,27 @@ def compute_iou(box, boxes, box_area, boxes_area):
     efficiency. Calculate once in the caller to avoid duplicate work.
     """
     # Calculate intersection areas
-    y1 = np.maximum(box[0], boxes[:, 0])
-    y2 = np.minimum(box[2], boxes[:, 2])
-    x1 = np.maximum(box[1], boxes[:, 1])
-    x2 = np.minimum(box[3], boxes[:, 3])
-    intersection = np.maximum(x2 - x1, 0) * np.maximum(y2 - y1, 0)
+    z1 = np.maximum(box[0], boxes[:, 0])
+    z2 = np.maximum(box[3], boxes[:, 3])
+    y1 = np.maximum(box[1], boxes[:, 1])
+    y2 = np.minimum(box[4], boxes[:, 4])
+    x1 = np.maximum(box[2], boxes[:, 2])
+    x2 = np.minimum(box[5], boxes[:, 5])
+    intersection = np.maximum(z2 - z1, 0) * np.maximum(x2 - x1, 0) * np.maximum(y2 - y1, 0)
     union = box_area + boxes_area[:] - intersection[:]
     iou = intersection / union
     return iou
 
-
+# Done
 def compute_overlaps(boxes1, boxes2):
     """Computes IoU overlaps between two sets of boxes.
-    boxes1, boxes2: [N, (y1, x1, y2, x2)].
+    boxes1, boxes2: [N, (z1, y1, x1, z2, y2, x2)].
 
     For better performance, pass the largest set first and the smaller second.
     """
     # Areas of anchors and GT boxes
-    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+    area1 = (boxes1[:, 3] - boxes1[:, 0]) * (boxes1[:, 4] - boxes1[:, 1]) * (boxes1[:, 5] - boxes1[:, 2])
+    area2 = (boxes2[:, 3] - boxes2[:, 0]) * (boxes2[:, 4] - boxes2[:, 1]) * (boxes2[:, 5] - boxes2[:, 2])
 
     # Compute overlaps to generate matrix [boxes1 count, boxes2 count]
     # Each cell contains the IoU value.
@@ -208,28 +212,31 @@ def box_refinement_graph(box, gt_box):
 
 def box_refinement(box, gt_box):
     """Compute refinement needed to transform box to gt_box.
-    box and gt_box are [N, (y1, x1, y2, x2)]. (y2, x2) is
+    box and gt_box are [N, (z1, y1, x1, z2, y2, x2)]. (z2, y2, x2) is
     assumed to be outside the box.
     """
     box = box.astype(np.float32)
     gt_box = gt_box.astype(np.float32)
-
-    height = box[:, 2] - box[:, 0]
-    width = box[:, 3] - box[:, 1]
-    center_y = box[:, 0] + 0.5 * height
-    center_x = box[:, 1] + 0.5 * width
-
-    gt_height = gt_box[:, 2] - gt_box[:, 0]
-    gt_width = gt_box[:, 3] - gt_box[:, 1]
-    gt_center_y = gt_box[:, 0] + 0.5 * gt_height
-    gt_center_x = gt_box[:, 1] + 0.5 * gt_width
-
+    depth = box[:, 3] - box[:, 0]
+    height = box[:, 4] - box[:, 1]
+    width = box[:, 5] - box[:, 2]
+    center_z = box[:, 0] + 0.5 * depth
+    center_y = box[:, 1] + 0.5 * height
+    center_x = box[:, 2] + 0.5 * width
+    gt_depth = gt_box[:, 3] - gt_box[:, 0]
+    gt_height = gt_box[:, 4] - gt_box[:, 1]
+    gt_width = gt_box[:, 5] - gt_box[:, 2]
+    gt_center_z = gt_box[:, 0] + 0.5 * gt_depth
+    gt_center_y = gt_box[:, 1] + 0.5 * gt_height
+    gt_center_x = gt_box[:, 2] + 0.5 * gt_width
+    dz = (gt_center_z - center_z) / depth
     dy = (gt_center_y - center_y) / height
     dx = (gt_center_x - center_x) / width
+    dd = np.log(gt_depth / depth)
     dh = np.log(gt_height / height)
     dw = np.log(gt_width / width)
 
-    return np.stack([dy, dx, dh, dw], axis=1)
+    return np.stack([dz, dy, dx, dd, dh, dw], axis=1)
 
 
 ############################################################
@@ -359,21 +366,14 @@ class Dataset(object):
         image = np.load(self.image_info[image_id]['path'])
         return image
 
-    def load_landmark(self, image_id):
+    def load_annotations(self, image_id):
         """Load landmarks for the given image.
-
-        Different datasets use different ways to store masks. Override this
-        method to load instance masks and return them in the form of am
-        array of binary masks of shape [height, width, instances].
 
         Returns:
             bboxes: An array of landmark points represented as 3 dimensional bounding
-            boxes of dimension 1. 
+            boxes of depth, height, width 1. 
             class_ids: a 1D array of class IDs of the bounding boxes.
         """
-        # Override this function to load a mask from your dataset.
-        # Otherwise, it returns an empty mask.
-        logging.warning("You are using the default load_mask(), maybe you need to define your own one.")
         bboxes = np.empty([0, 0, 0])
         class_ids = np.empty([0], np.int32)
         return bboxes, class_ids
@@ -404,7 +404,7 @@ def resize_image(image, min_dim=None, max_dim=None, min_scale=None, mode="square
 
     Returns:
     image: the resized image
-    window: (y1, x1, y2, x2). If max_dim is provided, padding might
+    window: (z1, y1, x1, z2, y2, x2). If max_dim is provided, padding might
         be inserted in the returned image. If so, this window is the
         coordinates of the image part of the full image (excluding
         the padding). The x2, y2 pixels are not included.
@@ -413,9 +413,9 @@ def resize_image(image, min_dim=None, max_dim=None, min_scale=None, mode="square
     """
     # Keep track of image dtype and return results in the same dtype
     image_dtype = image.dtype
-    # Default window (y1, x1, y2, x2) and default scale == 1.
-    h, w = image.shape[:2]
-    window = (0, 0, h, w)
+    # Default window (z1, y1, x1, z2, y2, x2) and default scale == 1.
+    d, h, w = image.shape[:3] # First dimension in depth and last is the number of channelsdd
+    window = (0, 0, 0, d, h, w)
     scale = 1
     padding = [(0, 0), (0, 0), (0, 0)]
     crop = None
@@ -438,22 +438,34 @@ def resize_image(image, min_dim=None, max_dim=None, min_scale=None, mode="square
 
     # Resize image using bilinear interpolation
     if scale != 1:
-        image = resize(image, (round(h * scale), round(w * scale)),
-                       preserve_range=True)
+        new_h = round(h*scale)
+        new_w = round(w*scale)
+        new_image = np.empty(shape = (image.shape[0], new_h, new_w, 1), dtype =np.int32)
+        for slice in range(image.shape[0]):
+            img_slice = image[slice]
+            img_array = cv2.normalize(img_slice, None, alpha = 0, beta = 255,norm_type = cv2.NORM_MINMAX, dtype = cv2.CV_32S)
+            image = PIL.Image.fromarray(img_array)
+            re_image = image.resize((256,256))
+            re_image_exp = np.expand_dims(np.asarray(re_image), axis = 2)
+            new_image[slice] = re_image_exp
 
     # Need padding or cropping?
     if mode == "square":
         # Get new height and width
-        h, w = image.shape[:2]
+        d, h, w = image.shape[0:3]
         top_pad = (max_dim - h) // 2
         bottom_pad = max_dim - h - top_pad
         left_pad = (max_dim - w) // 2
         right_pad = max_dim - w - left_pad
         padding = [(top_pad, bottom_pad), (left_pad, right_pad), (0, 0)]
-        image = np.pad(image, padding, mode='constant', constant_values=0)
-        window = (top_pad, left_pad, h + top_pad, w + left_pad)
+        # Swapping the axes to perform padding operation only on the height and width
+        image_swapped = image.swapaxes(0,1).swapaxes(1,2)
+        image = np.pad(image_swapped, padding, mode='constant', constant_values=0)
+        # Swapping the axes again to bring the dimensions to the original arrangement
+        image = image.swapaxes(1,2).swapaxes(0,1)
+        window = (0, top_pad, left_pad, d, h + top_pad, w + left_pad)
     elif mode == "pad64":
-        h, w = image.shape[:2]
+        d, h, w = image.shape[0:3]
         # Both sides must be divisible by 64
         assert min_dim % 64 == 0, "Minimum dimension must be a multiple of 64"
         # Height
@@ -471,147 +483,81 @@ def resize_image(image, min_dim=None, max_dim=None, min_scale=None, mode="square
         else:
             left_pad = right_pad = 0
         padding = [(top_pad, bottom_pad), (left_pad, right_pad), (0, 0)]
+        # Swapping the axes to perform padding operation only on the height and width
+        image_swapped = image.swapaxes(0,1).swapaxes(1,2)
         image = np.pad(image, padding, mode='constant', constant_values=0)
-        window = (top_pad, left_pad, h + top_pad, w + left_pad)
+        # Swapping the axes again to bring the dimensions to the original arrangement
+        image = image.swapaxes(1,2).swapaxes(0,1)
+        window = (0, top_pad, left_pad, d, h + top_pad, w + left_pad)
     elif mode == "crop":
         # Pick a random crop
-        h, w = image.shape[:2]
+        d, h, w = image.shape[:3]
         y = random.randint(0, (h - min_dim))
         x = random.randint(0, (w - min_dim))
         crop = (y, x, min_dim, min_dim)
-        image = image[y:y + min_dim, x:x + min_dim]
-        window = (0, 0, min_dim, min_dim)
+        image = image[:, y:y + min_dim, x:x + min_dim]
+        window = (0, 0, 0, d, min_dim, min_dim)
     else:
         raise Exception("Mode {} not supported".format(mode))
     return image.astype(image_dtype), window, scale, padding, crop
 
-
-def resize_mask(mask, scale, padding, crop=None):
-    """Resizes a mask using the given scale and padding.
+# TODO: Modify the below function to resize bounding boxes for an resized image.
+def resize_bbox(bboxes, scale, padding, crop=None):
+    """Resizes a bbox using the given scale and padding.
     Typically, you get the scale and padding from resize_image() to
     ensure both, the image and the mask, are resized consistently.
 
-    scale: mask scaling factor
-    padding: Padding to add to the mask in the form
+    scale: bbox scaling factor
+    padding: Padding to add to the bbox in the form
             [(top, bottom), (left, right), (0, 0)]
     """
     # Suppress warning from scipy 0.13.0, the output shape of zoom() is
     # calculated with round() instead of int()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        mask = scipy.ndimage.zoom(mask, zoom=[scale, scale, 1], order=0)
-    if crop is not None:
-        y, x, h, w = crop
-        mask = mask[y:y + h, x:x + w]
-    else:
-        mask = np.pad(mask, padding, mode='constant', constant_values=0)
-    return mask
-
-
-def minimize_mask(bbox, mask, mini_shape):
-    """Resize masks to a smaller version to reduce memory load.
-    Mini-masks can be resized back to image scale using expand_masks()
-
-    See inspect_data.ipynb notebook for more details.
-    """
-    mini_mask = np.zeros(mini_shape + (mask.shape[-1],), dtype=bool)
-    for i in range(mask.shape[-1]):
-        # Pick slice and cast to bool in case load_mask() returned wrong dtype
-        m = mask[:, :, i].astype(bool)
-        y1, x1, y2, x2 = bbox[i][:4]
-        m = m[y1:y2, x1:x2]
-        if m.size == 0:
-            raise Exception("Invalid bounding box with area of zero")
-        # Resize with bilinear interpolation
-        m = resize(m, mini_shape)
-        mini_mask[:, :, i] = np.around(m).astype(np.bool)
-    return mini_mask
-
-
-def expand_mask(bbox, mini_mask, image_shape):
-    """Resizes mini masks back to image size. Reverses the change
-    of minimize_mask().
-
-    See inspect_data.ipynb notebook for more details.
-    """
-    mask = np.zeros(image_shape[:2] + (mini_mask.shape[-1],), dtype=bool)
-    for i in range(mask.shape[-1]):
-        m = mini_mask[:, :, i]
-        y1, x1, y2, x2 = bbox[i][:4]
-        h = y2 - y1
-        w = x2 - x1
-        # Resize with bilinear interpolation
-        m = resize(m, (h, w))
-        mask[y1:y2, x1:x2, i] = np.around(m).astype(np.bool)
-    return mask
-
-
-# TODO: Build and use this function to reduce code duplication
-def mold_mask(mask, config):
-    pass
-
-
-def unmold_mask(mask, bbox, image_shape):
-    """Converts a mask generated by the neural network to a format similar
-    to its original shape.
-    mask: [height, width] of type float. A small, typically 28x28 mask.
-    bbox: [y1, x1, y2, x2]. The box to fit the mask in.
-
-    Returns a binary mask with the same size as the original image.
-    """
-    threshold = 0.5
-    y1, x1, y2, x2 = bbox
-    mask = resize(mask, (y2 - y1, x2 - x1))
-    mask = np.where(mask >= threshold, 1, 0).astype(np.bool)
-
-    # Put the mask in the right location.
-    full_mask = np.zeros(image_shape[:2], dtype=np.bool)
-    full_mask[y1:y2, x1:x2] = mask
-    return full_mask
+        for idx, bbox in enumerate(bboxes):
+            bboxes[idx] = scipy.ndimage.zoom(bbox, zoom=scale, order=0)
+    bboxes = np.pad(bboxes, padding, mode='constant', constant_values=0)
+    return bboxes
 
 
 ############################################################
 #  Anchors
 ############################################################
 
-def generate_anchors(scales, ratios, shape, feature_stride, anchor_stride):
+def generate_3d_anchors(scales, ratios, shape, feature_stride, anchor_stride):
     """
-    scales: 1D array of anchor sizes in pixels. Example: [32, 64, 128]
-    ratios: 1D array of anchor ratios of width/height. Example: [0.5, 1, 2]
-    shape: [height, width] spatial shape of the feature map over which
+    scales: 1D array of anchor sizes in pixels. Example: [4, 8, 16]
+    shape: [depth, height, width] spatial shape of the feature map over which
             to generate anchors.
     feature_stride: Stride of the feature map relative to the image in pixels.
     anchor_stride: Stride of anchors on the feature map. For example, if the
         value is 2 then generate anchors for every other feature map pixel.
     """
-    # Get all combinations of scales and ratios
-    scales, ratios = np.meshgrid(np.array(scales), np.array(ratios))
-    scales = scales.flatten()
-    ratios = ratios.flatten()
 
-    # Enumerate heights and widths from scales and ratios
-    heights = scales / np.sqrt(ratios)
-    widths = scales * np.sqrt(ratios)
+    # Enumerate heights and widths from scales
+    depths, heights, widths = scales, scales, scales
 
     # Enumerate shifts in feature space
-    shifts_y = np.arange(0, shape[0], anchor_stride) * feature_stride
-    shifts_x = np.arange(0, shape[1], anchor_stride) * feature_stride
-    shifts_x, shifts_y = np.meshgrid(shifts_x, shifts_y)
+    shifts_z = np.arange(0, shape[0], anchor_stride) * feature_stride
+    shifts_y = np.arange(0, shape[1], anchor_stride) * feature_stride
+    shifts_x = np.arange(0, shape[2], anchor_stride) * feature_stride
+    shifts_x, shifts_y, shifts_z = np.meshgrid(shifts_x, shifts_y, shifts_z)
 
-    # Enumerate combinations of shifts, widths, and heights
+    # Enumerate combinations of shifts, widths, heights and depths
+    box_depths, box_centers_z = np.meshgrid(depths, shifts_z)
     box_widths, box_centers_x = np.meshgrid(widths, shifts_x)
     box_heights, box_centers_y = np.meshgrid(heights, shifts_y)
 
-    # Reshape to get a list of (y, x) and a list of (h, w)
+    # Reshape to get a list of (z, y, x) and a list of (d, h, w)
     box_centers = np.stack(
-        [box_centers_y, box_centers_x], axis=2).reshape([-1, 2])
-    box_sizes = np.stack([box_heights, box_widths], axis=2).reshape([-1, 2])
+        [box_centers_z, box_centers_y, box_centers_x], axis=2).reshape([-1, 3])
+    box_sizes = np.stack([box_depths, box_heights, box_widths], axis=2).reshape([-1, 3])
 
-    # Convert to corner coordinates (y1, x1, y2, x2)
+    # Convert to corner coordinates (z1, y1, x1, z2, y2, x2)
     boxes = np.concatenate([box_centers - 0.5 * box_sizes,
                             box_centers + 0.5 * box_sizes], axis=1)
     return boxes
-
 
 def generate_pyramid_anchors(scales, ratios, feature_shapes, feature_strides,
                              anchor_stride):
@@ -620,15 +566,15 @@ def generate_pyramid_anchors(scales, ratios, feature_shapes, feature_strides,
     all levels of the pyramid.
 
     Returns:
-    anchors: [N, (y1, x1, y2, x2)]. All generated anchors in one array. Sorted
+    anchors: [N, (z1, y1, x1, z2, y2, x2)]. All generated anchors in one array. Sorted
         with the same order of the given scales. So, anchors of scale[0] come
         first, then anchors of scale[1], and so on.
     """
     # Anchors
-    # [anchor_count, (y1, x1, y2, x2)]
+    # [anchor_count, (z1, y1, x1, z2, y2, x2)]
     anchors = []
     for i in range(len(scales)):
-        anchors.append(generate_anchors(scales[i], ratios, feature_shapes[i],
+        anchors.append(generate_3d_anchors(scales[i], ratios, feature_shapes[i],
                                         feature_strides[i], anchor_stride))
     return np.concatenate(anchors, axis=0)
 
