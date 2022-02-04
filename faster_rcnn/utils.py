@@ -162,51 +162,60 @@ def non_max_suppression(boxes, scores, threshold):
 
 def apply_box_deltas(boxes, deltas):
     """Applies the given deltas to the given boxes.
-    boxes: [N, (y1, x1, y2, x2)]. Note that (y2, x2) is outside the box.
-    deltas: [N, (dy, dx, log(dh), log(dw))]
+    boxes: [N, (z1, y1, x1, z2, y2, x2)]. Note that (z2, y2, x2) is outside the box.
+    deltas: [N, (dz, dy, dx, log(dd), log(dh), log(dw))]
     """
     boxes = boxes.astype(np.float32)
-    # Convert to y, x, h, w
-    height = boxes[:, 2] - boxes[:, 0]
-    width = boxes[:, 3] - boxes[:, 1]
-    center_y = boxes[:, 0] + 0.5 * height
-    center_x = boxes[:, 1] + 0.5 * width
+    # Convert to z, y, x, d, h, w
+    depth = boxes[:, 3] - boxes[:, 0]
+    height = boxes[:, 4] - boxes[:, 1]
+    width = boxes[:, 5] - boxes[:, 2]
+    center_z = boxes[:, 0] + 0.5 * depth
+    center_y = boxes[:, 1] + 0.5 * height
+    center_x = boxes[:, 2] + 0.5 * width
     # Apply deltas
-    center_y += deltas[:, 0] * height
-    center_x += deltas[:, 1] * width
-    height *= np.exp(deltas[:, 2])
-    width *= np.exp(deltas[:, 3])
-    # Convert back to y1, x1, y2, x2
+    center_z += deltas[:, 0] * depth
+    center_y += deltas[:, 1] * height
+    center_x += deltas[:, 2] * width
+    depth *= np.exp(deltas[:, 3])
+    height *= np.exp(deltas[:, 4])
+    width *= np.exp(deltas[:, 5])
+    # Convert back to z1, y1, x1, z2, y2, x2
+    z1 = center_z - 0.5 * depth
     y1 = center_y - 0.5 * height
     x1 = center_x - 0.5 * width
+    z2 = z1 + depth
     y2 = y1 + height
     x2 = x1 + width
-    return np.stack([y1, x1, y2, x2], axis=1)
+    return np.stack([z1 , y1, x1, z2, y2, x2], axis=1)
 
 
 def box_refinement_graph(box, gt_box):
     """Compute refinement needed to transform box to gt_box.
-    box and gt_box are [N, (y1, x1, y2, x2)]
+    box and gt_box are [N, (z1 ,y1, x1, z2, y2, x2)]
     """
     box = tf.cast(box, tf.float32)
     gt_box = tf.cast(gt_box, tf.float32)
-
-    height = box[:, 2] - box[:, 0]
-    width = box[:, 3] - box[:, 1]
-    center_y = box[:, 0] + 0.5 * height
-    center_x = box[:, 1] + 0.5 * width
-
-    gt_height = gt_box[:, 2] - gt_box[:, 0]
-    gt_width = gt_box[:, 3] - gt_box[:, 1]
-    gt_center_y = gt_box[:, 0] + 0.5 * gt_height
-    gt_center_x = gt_box[:, 1] + 0.5 * gt_width
-
+    depth = box[:, 3] - box[:, 0]
+    height = box[:, 4] - box[:, 1]
+    width = box[:, 5] - box[:, 2]
+    center_z = box[:, 0] + 0.5 * depth
+    center_y = box[:, 1] + 0.5 * height
+    center_x = box[:, 2] + 0.5 * width
+    gt_depth = gt_box[:, 3] - gt_box[:, 0]
+    gt_height = gt_box[:, 4] - gt_box[:, 1]
+    gt_width = gt_box[:, 5] - gt_box[:, 2]
+    gt_center_z  = gt_box[:, 0] + 0.5 * gt_depth
+    gt_center_y = gt_box[:,1] + 0.5 * gt_height
+    gt_center_x = gt_box[:, 2] + 0.5 * gt_width
+    dz = (gt_center_z - center_z) / depth
     dy = (gt_center_y - center_y) / height
     dx = (gt_center_x - center_x) / width
+    dd = tf.log(gt_depth / depth)
     dh = tf.log(gt_height / height)
     dw = tf.log(gt_width / width)
 
-    result = tf.stack([dy, dx, dh, dw], axis=1)
+    result = tf.stack([dz, dy, dx, dd, dh, dw], axis=1)
     return result
 
 
@@ -792,18 +801,18 @@ def download_trained_weights(coco_model_path, verbose=1):
 
 def norm_boxes(boxes, shape):
     """Converts boxes from pixel coordinates to normalized coordinates.
-    boxes: [N, (y1, x1, y2, x2)] in pixel coordinates
-    shape: [..., (height, width)] in pixels
+    boxes: [N, (z1, y1, x1, z2, y2, x2)] in pixel coordinates
+    shape: [..., (depth, height, width)] in pixels
 
-    Note: In pixel coordinates (y2, x2) is outside the box. But in normalized
+    Note: In pixel coordinates (z2, y2, x2) is outside the box. But in normalized
     coordinates it's inside the box.
 
     Returns:
-        [N, (y1, x1, y2, x2)] in normalized coordinates
+        [N, (z1, y1, x1, z2, y2, x2)] in normalized coordinates
     """
-    h, w = shape
-    scale = np.array([h - 1, w - 1, h - 1, w - 1])
-    shift = np.array([0, 0, 1, 1])
+    d, h, w = shape
+    scale = np.array([d - 1, h - 1, w - 1, d - 1, h - 1, w - 1])
+    shift = np.array([0, 0, 0, 1, 1, 1])
     return np.divide((boxes - shift), scale).astype(np.float32)
 
 
